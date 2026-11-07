@@ -1,0 +1,18 @@
+{
+  "bind": "127.0.0.1",
+  "cache_file": "",
+  "embed_text": "last_user",
+  "embeddings_base_url": "",
+  "embeddings_model": "text-embedding-3-small",
+  "ignore_keys": [
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "seed"
+  ],
+  "max_entries": 1000,
+  "port": 8788,
+  "similarity_threshold": 0.85,
+  "ttl_seconds": 86400,
+  "upstream_base_url": "https://api.openai.com/v1"
+}
