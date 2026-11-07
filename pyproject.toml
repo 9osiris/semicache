@@ -1,0 +1,23 @@
+[build-system]
+requires-python = ">=3.9"
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "semicache"
+version = "1.0.0"
+description = "semantic cache for openai-compatible chat apis"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "osiris" }]
+keywords = ["ai", "llm", "caching", "openai", "developer-tools"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+]
+
+[project.scripts]
+semicache = "semicache.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/9osiris/semicache"
