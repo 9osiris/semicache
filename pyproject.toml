@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "semicache"
-version = "1.0.0"
+version = "1.1.0"
 description = "semantic cache for openai-compatible chat apis"
 readme = "README.md"
 requires-python = ">=3.9"
