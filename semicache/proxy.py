@@ -12,6 +12,7 @@ from .match import (build_reply, exact_lookup, extract_reply_text,
 from .pricing import cost_usd
 from .stats import Stats
 from .store import CacheStore, Entry, query_text
+from .stream import assemble_sse, render_sse, stream_reply
 
 
 class CacheServer:
@@ -73,28 +74,76 @@ class CacheServer:
             return 502, "application/json", json.dumps(
                 {"error": {"message": "upstream unreachable: %s" % e}}).encode("utf-8")
 
+    def _record_hit(self, kind, entry):
+        usage = entry.usage
+        cost, unknown = cost_usd(entry.model,
+                                 usage.get("prompt_tokens", 0),
+                                 usage.get("completion_tokens", 0))
+        self.stats.record(kind, usage.get("prompt_tokens", 0),
+                          usage.get("completion_tokens", 0), cost, unknown)
+
+    def handle_stream(self, body, headers):
+        """a streaming request. a cache hit replays the stored reply as
+        sse, a miss forwards upstream and stores the assembled text when
+        the stream finishes cleanly. returns (status, raw sse bytes,
+        cache status, similarity)."""
+        model = body.get("model", "")
+        messages = body.get("messages", [])
+        if not isinstance(messages, list) or not messages:
+            data = json.dumps(
+                {"error": {"message": "messages must be a non-empty list"}}
+            ).encode("utf-8")
+            return 400, data, "error", None
+        entry, key = exact_lookup(self.store, model, messages, body,
+                                  self.cfg["ignore_keys"])
+        if entry is not None:
+            self.store.hit(entry)
+            self._record_hit("exact", entry)
+            return 200, render_sse(model, extract_reply_text(entry.reply),
+                                   entry.usage), "hit-exact", None
+        embedding = None
+        if self.embedder.enabled:
+            text = query_text(messages, self.cfg["embed_text"])
+            embedding = self.embedder.embed(text)
+        if embedding is not None:
+            match, score = semantic_lookup(self.store, embedding,
+                                           self.cfg["similarity_threshold"])
+            if match is not None:
+                self.store.hit(match)
+                self._record_hit("semantic", match)
+                return 200, render_sse(model,
+                                       extract_reply_text(match.reply),
+                                       match.usage), "hit-semantic", round(score, 4)
+        status, ctype, raw = self.forward_raw(body, headers)
+        if status == 200:
+            parsed = assemble_sse(raw)
+            if parsed["complete"] and parsed["text"] and not parsed["tool_calls"]:
+                reply = stream_reply(model, parsed["text"], parsed["usage"])
+                new_entry = Entry(key, model, messages, reply,
+                                  parsed["usage"], embedding=embedding)
+                self.store.put(new_entry)
+                self.stats.record("miss")
+                return status, raw, "miss", None
+        self.stats.record("miss")
+        return status, raw, "stream-passthrough", None
+
     def handle_chat(self, body, headers):
         """one chat completion. returns (status, reply, cache status, similarity).
 
-        streaming requests come back as (None, None, "stream-passthrough",
-        None): the http layer relays the raw sse bytes, nothing is cached.
+        streaming requests go through handle_stream and come back as
+        (status, raw sse bytes, kind, similarity).
         """
         model = body.get("model", "")
         messages = body.get("messages", [])
         if not isinstance(messages, list) or not messages:
             return 400, {"error": {"message": "messages must be a non-empty list"}}, "error", None
         if body.get("stream"):
-            return None, None, "stream-passthrough", None
+            return self.handle_stream(body, headers)
         entry, key = exact_lookup(self.store, model, messages, body,
                                   self.cfg["ignore_keys"])
         if entry is not None:
             self.store.hit(entry)
-            usage = entry.usage
-            cost, unknown = cost_usd(entry.model,
-                                     usage.get("prompt_tokens", 0),
-                                     usage.get("completion_tokens", 0))
-            self.stats.record("exact", usage.get("prompt_tokens", 0),
-                              usage.get("completion_tokens", 0), cost, unknown)
+            self._record_hit("exact", entry)
             return 200, build_reply(entry, model), "hit-exact", None
         embedding = None
         if self.embedder.enabled:
@@ -105,12 +154,7 @@ class CacheServer:
                                            self.cfg["similarity_threshold"])
             if match is not None:
                 self.store.hit(match)
-                usage = match.usage
-                cost, unknown = cost_usd(match.model,
-                                         usage.get("prompt_tokens", 0),
-                                         usage.get("completion_tokens", 0))
-                self.stats.record("semantic", usage.get("prompt_tokens", 0),
-                                  usage.get("completion_tokens", 0), cost, unknown)
+                self._record_hit("semantic", match)
                 return 200, build_reply(match, model), "hit-semantic", round(score, 4)
         status, reply = self.forward(body, headers)
         if status == 200 and extract_reply_text(reply):
@@ -181,12 +225,15 @@ class CacheServer:
                     self._send_json(400, {"error": {"message": "body must be an object"}})
                     return
                 if body.get("stream"):
-                    # streaming bypasses the cache, relay the raw sse bytes
-                    status, ctype, raw = server.forward_raw(body, self.headers)
+                    # streaming goes through the cache too: hits replay the
+                    # stored reply as sse, misses store the assembled text
+                    status, raw, cache_status, sim = server.handle_stream(body, self.headers)
                     self.send_response(status)
-                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Content-Length", str(len(raw)))
-                    self.send_header("X-Semicache", "stream-passthrough")
+                    self.send_header("X-Semicache", cache_status)
+                    if sim is not None:
+                        self.send_header("X-Semicache-Similarity", str(sim))
                     self.end_headers()
                     self.wfile.write(raw)
                     return
