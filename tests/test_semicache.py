@@ -22,6 +22,7 @@ from semicache.pricing import cost_usd, price_for
 from semicache.proxy import CacheServer, run_server
 from semicache.stats import Stats
 from semicache.store import (CacheStore, Entry, canonical_key, query_text)
+from semicache.stream import assemble_sse, render_sse, stream_reply
 from semicache.cli import main
 
 CHECKS = [0, 0]
@@ -92,8 +93,18 @@ class FakeUpstream(BaseHTTPRequestHandler):
         if self.path == "/v1/chat/completions":
             FakeUpstream.calls += 1
             if body.get("stream"):
-                sse = (b"data: {\"choices\": [{\"delta\": {\"content\": \"streamed\"}}]}\n\n"
-                       b"data: [DONE]\n\n")
+                last = ""
+                for m in body.get("messages", []):
+                    if m.get("role") == "user":
+                        last = m.get("content", "")
+                if "toolcall" in last:
+                    sse = (b"data: {\"choices\": [{\"delta\": {\"tool_calls\": [{\"function\": {\"name\": \"calc\"}}]}}]}\n\n"
+                           b"data: [DONE]\n\n")
+                elif "cutoff" in last:
+                    sse = b"data: {\"choices\": [{\"delta\": {\"content\": \"half\"}}]}\n\n"
+                else:
+                    sse = (b"data: {\"choices\": [{\"delta\": {\"content\": \"streamed\"}}]}\n\n"
+                           b"data: [DONE]\n\n")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Content-Length", str(len(sse)))
@@ -367,16 +378,42 @@ def test_proxy_e2e():
     status, reply, kind, sim = server.handle_chat(other, {})
     check("unrelated prompt misses", kind == "miss")
     check("unrelated miss calls upstream", FakeUpstream.calls == 2)
-    stream = {"model": "gpt-4o-mini", "messages": msgs, "stream": True}
-    status, reply, kind, sim = server.handle_chat(stream, {})
-    check("streaming returns passthrough sentinel",
-          kind == "stream-passthrough" and status is None)
+    joke = [{"role": "user", "content": "tell me a joke"}]
+    stream = {"model": "gpt-4o-mini", "messages": joke, "stream": True}
+    status, raw, kind, sim = server.handle_chat(stream, {})
+    check("stream miss calls upstream and stores",
+          kind == "miss" and status == 200 and FakeUpstream.calls == 3
+          and server.store.count() == 3)
+    check("stream miss returns the raw sse",
+          b"streamed" in raw and b"data: [DONE]" in raw)
+    status, raw, kind, sim = server.handle_chat(stream, {})
+    check("repeat stream is an exact hit",
+          kind == "hit-exact" and FakeUpstream.calls == 3)
+    check("replayed stream reassembles to the same text",
+          assemble_sse(raw)["text"] == "streamed")
+    status, reply, kind, sim = server.handle_chat(
+        {"model": "gpt-4o-mini", "messages": joke}, {})
+    check("plain request hits a stream-stored reply",
+          kind == "hit-exact"
+          and reply["choices"][0]["message"]["content"] == "streamed")
+    tool = {"model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "toolcall please"}],
+            "stream": True}
+    status, raw, kind, sim = server.handle_chat(tool, {})
+    check("tool call stream passes through uncached",
+          kind == "stream-passthrough" and server.store.count() == 3)
+    cut = {"model": "gpt-4o-mini",
+           "messages": [{"role": "user", "content": "cutoff please"}],
+           "stream": True}
+    status, raw, kind, sim = server.handle_chat(cut, {})
+    check("cut off stream passes through uncached",
+          kind == "stream-passthrough" and server.store.count() == 3)
     status, reply, kind, sim = server.handle_chat({"model": "m", "messages": []}, {})
     check("empty messages is a 400", status == 400)
     stats = server.stats.to_dict()
     check("stats recorded the run",
-          stats["requests"] == 5 and stats["exact_hits"] == 2
-          and stats["semantic_hits"] == 1 and stats["misses"] == 2)
+          stats["requests"] == 10 and stats["exact_hits"] == 4
+          and stats["semantic_hits"] == 1 and stats["misses"] == 5)
     check("stats saved tokens", stats["tokens_saved"] == 45)
     upstream.shutdown()
 
@@ -417,9 +454,13 @@ def test_http():
               "messages": [{"role": "user", "content": "tell me a joke"}],
               "stream": True}
     s4, h4, b4 = post_json(base + "/v1/chat/completions", stream)
-    check("http streaming relays sse",
-          h4.get("X-Semicache") == "stream-passthrough"
-          and b"data: [DONE]" in b4)
+    check("http streaming miss stores",
+          h4.get("X-Semicache") == "miss" and b"data: [DONE]" in b4)
+    s5, h5, b5 = post_json(base + "/v1/chat/completions", stream)
+    check("http repeat stream hits exact",
+          h5.get("X-Semicache") == "hit-exact" and b"data: [DONE]" in b5)
+    check("http replayed stream has the same text",
+          assemble_sse(b5)["text"] == "streamed")
     with urllib.request.urlopen(base + "/semicache/stats", timeout=5) as r:
         stats = json.load(r)
     check("http stats endpoint works",
@@ -433,6 +474,48 @@ def test_http():
     except urllib.error.HTTPError as e:
         check("http unknown path is 404", e.code == 404)
     upstream.shutdown()
+
+
+def test_stream():
+    raw = (b": a comment line\n"
+           b"data: {\"choices\": [{\"delta\": {\"content\": \"hello \"}}]}\n\n"
+           b"data: {\"choices\": [{\"delta\": {\"content\": \"world\"}}], "
+           b"\"usage\": {\"prompt_tokens\": 4, \"completion_tokens\": 2}}\n\n"
+           b"data: [DONE]\n\n")
+    parsed = assemble_sse(raw)
+    check("assemble joins chunk text",
+          parsed["text"] == "hello world" and parsed["complete"])
+    check("assemble keeps usage from a chunk",
+          parsed["usage"] == {"prompt_tokens": 4, "completion_tokens": 2})
+    check("assemble has no tool calls", not parsed["tool_calls"])
+    cut = b"data: {\"choices\": [{\"delta\": {\"content\": \"half\"}}]}\n\n"
+    check("assemble without done is incomplete",
+          not assemble_sse(cut)["complete"])
+    tools = (b"data: {\"choices\": [{\"delta\": {\"tool_calls\": [{\"id\": \"1\"}]}}]}\n\n"
+             b"data: [DONE]\n\n")
+    check("assemble flags tool call deltas",
+          assemble_sse(tools)["tool_calls"])
+    junk = (b"data: {not json\n\n"
+            b"data: {\"choices\": [{\"delta\": {\"content\": \"ok\"}}]}\n\n"
+            b"data: [DONE]\n\n")
+    check("assemble skips bad json lines",
+          assemble_sse(junk)["text"] == "ok")
+    reply = stream_reply("gpt-4o-mini", "hi there",
+                         {"prompt_tokens": 3, "completion_tokens": 2})
+    check("stream reply shape",
+          reply["choices"][0]["message"]["content"] == "hi there"
+          and reply["choices"][0]["finish_reason"] == "stop")
+    rendered = render_sse("gpt-4o-mini", "hello world",
+                          {"prompt_tokens": 4, "completion_tokens": 2})
+    back = assemble_sse(rendered)
+    check("render roundtrips exactly",
+          back["text"] == "hello world" and back["complete"])
+    check("rendered stream carries usage",
+          back["usage"] == {"prompt_tokens": 4, "completion_tokens": 2})
+    check("rendered stream ends with done", rendered.endswith(b"data: [DONE]\n\n"))
+    empty = assemble_sse(render_sse("m", ""))
+    check("empty text renders and reassembles",
+          empty["text"] == "" and empty["complete"])
 
 
 def test_cli():
@@ -471,6 +554,7 @@ if __name__ == "__main__":
     test_stats()
     test_proxy_e2e()
     test_http()
+    test_stream()
     test_cli()
     print("%d/%d checks passed" % (CHECKS[1], CHECKS[0]))
     sys.exit(0 if CHECKS[1] == CHECKS[0] else 1)
