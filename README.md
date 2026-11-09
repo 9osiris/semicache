@@ -21,8 +21,11 @@ once. entries expire after a ttl, old ones get evicted lru-style, and
 stats tells you how many tokens and dollars you didnt spend. i avoided
 requests and redis and all of that, stdlib only, the cache is a json
 file in ~/.semicache so you can read it with your eyes. streaming
-requests pass straight through uncached, partial chunks are not worth
-storing.
+requests cache too: the chunks get collected as they fly past, and
+when the stream ends cleanly the assembled reply is stored like any
+other. the next identical request, streamed or not, replays it as
+sse. tool-call streams and streams cut off mid-flight still pass
+through uncached, there is nothing safe to store from those.
 
 the guide
 
@@ -36,7 +39,9 @@ semicache serve
 point your client at http://127.0.0.1:8788/v1 instead of the real api.
 same openai-compatible shape, same auth header forwarded. every reply
 carries an X-Semicache header: miss, hit-exact, hit-semantic (with an
-X-Semicache-Similarity score), or stream-passthrough.
+X-Semicache-Similarity score), or stream-passthrough, which now only
+means the stream could not be cached (tool calls, cut off, upstream
+error). a cached stream replays with hit-exact or hit-semantic.
 
 ```bash
 semicache stats          # hits, misses, tokens and dollars saved
@@ -62,5 +67,5 @@ the cost math uses a small built-in price table for common models.
 unlisted models still cache fine, their saved cost just shows as
 $0.0000 and stats notes how many hits that was.
 
-tests: python3 tests/test_semicache.py, 77 checks, fake chat and
+tests: python3 tests/test_semicache.py, 96 checks, fake chat and
 embeddings servers on 127.0.0.1, no api key needed.
