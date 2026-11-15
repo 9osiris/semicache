@@ -63,9 +63,11 @@ class Entry:
 class CacheStore:
     """json file of entries. load is tolerant, a corrupt file starts empty."""
 
-    def __init__(self, path, ttl_seconds=86400, max_entries=1000):
+    def __init__(self, path, ttl_seconds=86400, max_entries=1000,
+                 ttl_by_model=None):
         self.path = path
         self.ttl_seconds = ttl_seconds
+        self.ttl_by_model = ttl_by_model or {}
         self.max_entries = max_entries
         self.entries = {}
         self.corrupt = False
@@ -92,9 +94,14 @@ class CacheStore:
             json.dump(data, f, ensure_ascii=False)
         os.replace(tmp, self.path)
 
+    def ttl_for(self, model):
+        # per-model ttl wins, otherwise the global one. 0 never expires.
+        return self.ttl_by_model.get(model, self.ttl_seconds)
+
     def expired(self, entry, now=None):
         now = time.time() if now is None else now
-        return self.ttl_seconds > 0 and (now - entry.created_at) > self.ttl_seconds
+        ttl = self.ttl_for(entry.model)
+        return ttl > 0 and (now - entry.created_at) > ttl
 
     def prune(self, now=None):
         now = time.time() if now is None else now
