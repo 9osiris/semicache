@@ -158,6 +158,7 @@ def make_cfg(d, **over):
     cfg = {"upstream_base_url": "http://127.0.0.1:9/v1",
            "embeddings_base_url": "", "embeddings_model": "",
            "similarity_threshold": 0.85, "ttl_seconds": 86400,
+           "ttl_by_model": {},
            "max_entries": 1000, "port": 18791, "bind": "127.0.0.1",
            "cache_file": os.path.join(d, "cache.json"),
            "embed_text": "last_user",
@@ -171,6 +172,34 @@ def test_config():
     cfg = load(os.path.join(d, "missing.json"))
     check("config defaults load when file missing",
           cfg["port"] == 8788 and cfg["similarity_threshold"] == 0.85)
+    check("config defaults ttl_by_model to empty",
+          cfg["ttl_by_model"] == {})
+    bad = os.path.join(d, "bad.json")
+    with open(bad, "w") as f:
+        json.dump({"ttl_by_model": {"gpt-4o": 3600}}, f)
+    check("config loads ttl_by_model",
+          load(bad)["ttl_by_model"] == {"gpt-4o": 3600})
+    with open(bad, "w") as f:
+        json.dump({"ttl_by_model": {"gpt-4o": -1}}, f)
+    try:
+        load(bad)
+        check("config rejects negative per-model ttl", False)
+    except ConfigError:
+        check("config rejects negative per-model ttl", True)
+    with open(bad, "w") as f:
+        json.dump({"ttl_by_model": {"gpt-4o": "hour"}}, f)
+    try:
+        load(bad)
+        check("config rejects non-integer per-model ttl", False)
+    except ConfigError:
+        check("config rejects non-integer per-model ttl", True)
+    with open(bad, "w") as f:
+        json.dump({"ttl_by_model": ["gpt-4o"]}, f)
+    try:
+        load(bad)
+        check("config rejects non-object ttl_by_model", False)
+    except ConfigError:
+        check("config rejects non-object ttl_by_model", True)
     bad = os.path.join(d, "bad.json")
     with open(bad, "w") as f:
         json.dump({"similarity_threshold": 1.5}, f)
@@ -274,6 +303,24 @@ def test_store():
     check("query text all_user joins turns",
           query_text([{"role": "user", "content": "one"},
                       {"role": "user", "content": "two"}], "all_user") == "one\ntwo")
+    aged = CacheStore(os.path.join(d, "aged.json"), ttl_seconds=60,
+                      max_entries=10,
+                      ttl_by_model={"fast": 10, "forever": 0})
+    now = time.time()
+    aged.put(Entry("fast-old", "fast", [], {}, {},
+                   created_at=now - 30))
+    aged.put(Entry("plain-old", "plain", [], {}, {},
+                   created_at=now - 30))
+    aged.put(Entry("forever-old", "forever", [], {}, {},
+                   created_at=now - 86400 * 10))
+    check("per-model ttl expires the fast model early",
+          aged.get_exact("fast-old") is None)
+    check("default ttl still covers other models",
+          aged.get_exact("plain-old") is not None)
+    check("per-model ttl 0 never expires",
+          aged.get_exact("forever-old") is not None)
+    check("ttl_for falls back to the global ttl",
+          aged.ttl_for("plain") == 60 and aged.ttl_for("fast") == 10)
 
 
 def test_embed_pricing():
