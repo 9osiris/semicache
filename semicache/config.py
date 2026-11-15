@@ -9,6 +9,7 @@ DEFAULTS = {
     "embeddings_model": "",
     "similarity_threshold": 0.85,
     "ttl_seconds": 86400,
+    "ttl_by_model": {},
     "max_entries": 1000,
     "port": 8788,
     "bind": "127.0.0.1",
@@ -64,6 +65,12 @@ def validate(cfg):
     if not isinstance(cfg["ttl_seconds"], int) or isinstance(cfg["ttl_seconds"], bool) \
             or cfg["ttl_seconds"] < 0:
         raise ConfigError("ttl_seconds must be a non-negative integer")
+    tbm = cfg["ttl_by_model"]
+    if not isinstance(tbm, dict) \
+            or not all(isinstance(k, str) for k in tbm) \
+            or not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0
+                       for v in tbm.values()):
+        raise ConfigError("ttl_by_model must map model names to non-negative integers")
     if not isinstance(cfg["max_entries"], int) or isinstance(cfg["max_entries"], bool) \
             or cfg["max_entries"] < 1:
         raise ConfigError("max_entries must be a positive integer")
