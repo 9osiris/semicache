@@ -19,7 +19,8 @@ class CacheServer:
     def __init__(self, cfg):
         self.cfg = cfg
         self.store = CacheStore(cfg["cache_file"], cfg["ttl_seconds"],
-                                cfg["max_entries"])
+                                cfg["max_entries"],
+                                ttl_by_model=cfg["ttl_by_model"])
         stats_path = os.path.join(os.path.dirname(cfg["cache_file"]) or ".",
                                   "stats.json")
         self.stats = Stats(stats_path)
