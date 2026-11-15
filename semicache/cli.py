@@ -49,7 +49,8 @@ def cmd_stats(args):
         print("error: %s" % e, file=sys.stderr)
         return 1
     stats = Stats(_stats_path(cfg))
-    store = CacheStore(cfg["cache_file"], cfg["ttl_seconds"], cfg["max_entries"])
+    store = CacheStore(cfg["cache_file"], cfg["ttl_seconds"], cfg["max_entries"],
+                       ttl_by_model=cfg["ttl_by_model"])
     data = stats.to_dict()
     data["entries"] = store.count()
     if args.json:
@@ -76,7 +77,8 @@ def cmd_clear(args):
     except ConfigError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
-    store = CacheStore(cfg["cache_file"], cfg["ttl_seconds"], cfg["max_entries"])
+    store = CacheStore(cfg["cache_file"], cfg["ttl_seconds"], cfg["max_entries"],
+                       ttl_by_model=cfg["ttl_by_model"])
     n = store.count()
     store.clear()
     stats_path = _stats_path(cfg)
@@ -104,7 +106,12 @@ def cmd_check(args):
         return 1
     ok = True
     print("config: ok (%s)" % (args.config or DEFAULT_CONFIG_PATH))
-    store = CacheStore(cfg["cache_file"], cfg["ttl_seconds"], cfg["max_entries"])
+    if cfg["ttl_by_model"]:
+        print("per-model ttl: %s"
+              % ", ".join("%s=%ss" % (m, t)
+                          for m, t in sorted(cfg["ttl_by_model"].items())))
+    store = CacheStore(cfg["cache_file"], cfg["ttl_seconds"], cfg["max_entries"],
+                       ttl_by_model=cfg["ttl_by_model"])
     if store.corrupt:
         print("cache file: corrupt, would start empty")
     else:
