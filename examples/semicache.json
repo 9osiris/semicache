@@ -14,5 +14,6 @@
   "port": 8788,
   "similarity_threshold": 0.85,
   "ttl_seconds": 86400,
+  "ttl_by_model": {},
   "upstream_base_url": "https://api.openai.com/v1"
 }
