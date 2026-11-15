@@ -57,6 +57,10 @@ config keys, all in semicache.json:
 - embeddings_model: sent with embedding requests
 - similarity_threshold: 0.85 by default, a paraphrase needs to clear it
 - ttl_seconds: 86400 by default, 0 means entries never expire
+- ttl_by_model: per-model overrides, e.g. {"gpt-4o": 3600, "gpt-4o-mini": 300}.
+  a cheap model you re-ask all day can expire in minutes while the pricey
+  one stays cached for hours. 0 per model means that model never expires.
+  models not listed fall back to ttl_seconds
 - max_entries: 1000 by default, least recently hit evicted first
 - port / bind: 8788 on 127.0.0.1 by default, it never listens publicly
 - embed_text: last_user or all_user, what gets embedded for matching
@@ -67,5 +71,5 @@ the cost math uses a small built-in price table for common models.
 unlisted models still cache fine, their saved cost just shows as
 $0.0000 and stats notes how many hits that was.
 
-tests: python3 tests/test_semicache.py, 96 checks, fake chat and
+tests: python3 tests/test_semicache.py, 105 checks, fake chat and
 embeddings servers on 127.0.0.1, no api key needed.
